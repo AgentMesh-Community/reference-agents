@@ -206,10 +206,25 @@ async def _health(port: int) -> None:
     await server.serve_forever()
 
 
-def _credentials() -> tuple[Credentials, str]:
+async def _bundle(path: str) -> dict[str, Any]:
+    """The credential bundle. A bundle holding only the agent's key (its name
+    is bound, it has not joined yet) is waited on: Cloud Run re-reads a secret
+    mounted at "latest", so the credential is picked up when it is added."""
+    said = -1e9
+    while True:
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
+        if data.get("mesh_creds"):
+            return data
+        if time.monotonic() - said > 600:
+            log("waiting for this agent's connection credential (the bundle has its key only)")
+            said = time.monotonic()
+        await asyncio.sleep(30)
+
+
+async def _credentials() -> tuple[Credentials, str]:
     bundle = os.environ.get("AGENTMESH_CREDENTIALS_FILE")
     if bundle:
-        data = json.loads(Path(bundle).read_text(encoding="utf-8"))
+        data = await _bundle(bundle)
         folder = Path(tempfile.mkdtemp(prefix="agentmesh-"))
         os.chmod(folder, 0o700)
         for name, key in (("agent.seed", "agent_seed"), ("mesh.creds", "mesh_creds")):
@@ -288,12 +303,15 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
     gateway_handle = os.environ.get("RING_GATEWAY", DEFAULT_GATEWAY).strip().lower()
     local = os.environ.get("RING_LOCAL") == "1"
 
+    port = os.environ.get("PORT")
+    health = asyncio.create_task(_health(int(port))) if port else None
+
     if local:
         mesh = await connect([s for s in os.environ["AGENTMESH_SERVERS"].split(",") if s.strip()],
                              agent_seed=os.environ["AGENTMESH_AGENT_SEED"],
                              require_named=False, fence_inbound=False)
     else:
-        creds, folder = _credentials()
+        creds, folder = await _credentials()
         # AGENTMESH_SERVERS, when set, picks the endpoint (a Cloud Run deploy
         # sets wss://mesh.agentmesh.ai, the one that goes out over port 443).
         servers = [s for s in os.environ.get("AGENTMESH_SERVERS", "").split(",") if s.strip()] or None
@@ -391,11 +409,7 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
         t = asyncio.create_task(file_descriptor(mesh, handle, listed, offerings))
         tasks.add(t)
         t.add_done_callback(tasks.discard)
-    port = os.environ.get("PORT")
-    if port:
-        await _health(int(port))
-    else:
-        await asyncio.Event().wait()
+    await (health if health is not None else asyncio.Event().wait())
 
 
 def main(framework: str, write_line: WriteLine, description: str,

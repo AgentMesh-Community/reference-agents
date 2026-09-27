@@ -141,10 +141,23 @@ function parseCreds(text) {
   return { jwt, seed };
 }
 
-function loadCredentials() {
+/** The credential bundle. A bundle holding only the agent's key (its name is
+ *  bound, it has not joined yet) is waited on: Cloud Run re-reads a secret
+ *  mounted at "latest", so the credential is picked up when it is added. */
+async function readBundle(path) {
+  let said = 0;
+  for (;;) {
+    const d = JSON.parse(readFileSync(path, "utf8"));
+    if (d.mesh_creds) return d;
+    if (Date.now() - said > 600_000) { log("waiting for this agent's connection credential (the bundle has its key only)"); said = Date.now(); }
+    await sleep(30_000);
+  }
+}
+
+async function loadCredentials() {
   const bundle = process.env.AGENTMESH_CREDENTIALS_FILE;
   if (bundle) {
-    const d = JSON.parse(readFileSync(bundle, "utf8"));
+    const d = await readBundle(bundle);
     return { agentSeed: String(d.agent_seed).trim(), ...parseCreds(String(d.mesh_creds)), servers: d.servers ?? [], apiBase: d.api_base ?? "https://api.agentmesh.ai" };
   }
   const folder = process.env.AGENTMESH_FOLDER;
@@ -169,7 +182,7 @@ async function connectMesh() {
   if (process.env.RING_LOCAL === "1") {
     return AgentMesh.connect(pickServers(String(process.env.AGENTMESH_SERVERS).split(",").filter(Boolean)), { nkeySeed: process.env.AGENTMESH_AGENT_SEED, requireNamed: false, fenceInbound: false });
   }
-  const c = loadCredentials();
+  const c = await loadCredentials();
   const agentId = keyPairFromSeed(c.agentSeed).getPublicKey();
   // A credential that lapsed while this agent was stopped is renewed first:
   // renewal proves the keys over HTTPS and needs no live connection.
@@ -246,6 +259,10 @@ export async function runMember({ framework, writeLine, description, liveModels 
   const gatewayHandle = String(process.env.RING_GATEWAY ?? DEFAULT_GATEWAY).trim().toLowerCase();
   const local = process.env.RING_LOCAL === "1";
 
+  if (process.env.PORT) {
+    createServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("ring member\n"); })
+      .listen(Number(process.env.PORT), "0.0.0.0", () => log(`health checks answered on port ${process.env.PORT}`));
+  }
   const mesh = await connectMesh();
   const keys = new Keys(mesh, local ? process.env.RING_DIRECTORY : null);
   const seen = new Map();
@@ -338,10 +355,6 @@ export async function runMember({ framework, writeLine, description, liveModels 
   log(`ring member ready: ${handle} (${framework}) as ${mesh.id}`);
   if (!local) void fileDescriptor(mesh, handle, listed, offerings);
 
-  if (process.env.PORT) {
-    createServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("ring member\n"); })
-      .listen(Number(process.env.PORT), "0.0.0.0", () => log(`health checks answered on port ${process.env.PORT}`));
-  }
   const stop = async () => { await mesh.close().catch(() => {}); process.exit(0); };
   process.on("SIGTERM", stop);
   process.on("SIGINT", stop);
