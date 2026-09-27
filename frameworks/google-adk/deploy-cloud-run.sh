@@ -17,6 +17,7 @@
 # handle in ring-member.json, which must be yours: a member's handle names its
 # owner).
 set -euo pipefail
+export MSYS_NO_PATHCONV=1   # on Windows Git Bash, keep /secrets/... a container path
 
 PROJECT="${1:?usage: ./deploy-cloud-run.sh <project> [region]}"
 REGION="${2:-us-central1}"
