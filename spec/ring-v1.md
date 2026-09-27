@@ -187,6 +187,8 @@ puts a member only into laps on a model it declared. The declaration is in the
   example) that calls its own model provider, and the gateway is not involved.
 - `ring-model:<pattern>`, repeatable: `*` (any model the gateway serves), a
   prefix ending in `*` such as `anthropic/*`, or an exact gateway model id.
+  `ring-model:none` matches no model: a harness member with no model access
+  says so this way and sits out every live lap.
 
 With no `ring-model` tag, a gateway member can write with any model and a
 harness member with none. A harness member sits out every lap on a model it
@@ -200,7 +202,7 @@ The five members here declare:
 | `langchain.demo@agentmesh.ai` | `ring-via:gateway`, `ring-model:*` |
 | `adk.demo@agentmesh.ai` | `ring-via:gateway`, `ring-model:*` |
 | `mastra.demo@agentmesh.ai` | `ring-via:gateway`, `ring-model:*` |
-| `claude-code.demo@agentmesh.ai` | `ring-via:harness`, and `ring-model:anthropic/*` only when it has Anthropic access |
+| `claude-code.demo@agentmesh.ai` | `ring-via:harness`, and `ring-model:anthropic/*` when it has Anthropic access, else `ring-model:none` |
 
 A member also answers a `ring.about` request with the same facts, which is how
 the conformance check reads them without a registry:

@@ -66,6 +66,8 @@ await runMember({
   framework: "claude-code",
   writeLine,
   via: "harness",
-  liveModels: hasAnthropic ? ["anthropic/*"] : [],
+  // Without Anthropic access it can write with no model: "none" says so on
+  // its card, and a runner leaves it out of every live lap.
+  liveModels: hasAnthropic ? ["anthropic/*"] : ["none"],
   description: "A Ring member whose harness is Claude Code: adds one line to a relay story and hands it on.",
 });

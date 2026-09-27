@@ -20,8 +20,8 @@ is:
 
 Claude Code calls its own model, Anthropic's, not the AgentMesh model gateway.
 So this member declares on its card (the tags on its `ring.pass` offering)
-`ring-via:harness`, and `ring-model:anthropic/*` only when it has an Anthropic
-API key. A runner puts it only into laps it can run:
+`ring-via:harness`, and `ring-model:anthropic/*` when it has an Anthropic API
+key (`ring-model:none` when it has not). A runner puts it only into laps it can run:
 
 - fixed laps: always, and Claude Code is never started;
 - live laps on an Anthropic model: when it has a key;
