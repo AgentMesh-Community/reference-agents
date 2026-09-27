@@ -1,0 +1,52 @@
+name: ring member check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: ${{ matrix.member.folder }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        member:
+          - { folder: frameworks/crewai, lang: python }
+          - { folder: frameworks/langchain-py, lang: python }
+          - { folder: frameworks/google-adk, lang: python }
+          - { folder: frameworks/mastra, lang: node }
+          - { folder: harnesses/claude-code, lang: node }
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - uses: actions/setup-python@v5
+        if: matrix.member.lang == 'python'
+        with:
+          python-version: "3.12"
+
+      - name: nats-server
+        run: |
+          curl -sSL https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-linux-amd64.tar.gz | tar xz
+          echo "NATS_SERVER_BIN=$PWD/nats-server-v2.10.24-linux-amd64/nats-server" >> "$GITHUB_ENV"
+
+      - name: the member's dependencies
+        working-directory: ${{ matrix.member.folder }}
+        run: |
+          if [ "${{ matrix.member.lang }}" = python ]; then pip install -r requirements.txt; else npm ci; fi
+
+      - name: the check's dependencies
+        working-directory: tests
+        run: npm ci
+
+      - name: Ring member check (fixed mode, plus a live lap against a stub gateway)
+        working-directory: tests
+        env:
+          CREWAI_DISABLE_TELEMETRY: "true"
+          OTEL_SDK_DISABLED: "true"
+        run: node ring-check.mjs "../${{ matrix.member.folder }}" --live-stub --show-logs

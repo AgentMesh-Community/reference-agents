@@ -1,0 +1,17 @@
+{
+  "name": "ring-member-mastra",
+  "version": "1.0.0",
+  "private": true,
+  "description": "mastra.demo@agentmesh.ai: a Ring member written with Mastra.",
+  "license": "Apache-2.0",
+  "type": "module",
+  "engines": { "node": ">=22" },
+  "scripts": {
+    "start": "node agent.mjs",
+    "join": "node join.mjs"
+  },
+  "dependencies": {
+    "@mastra/core": "^1.71.0",
+    "agentmesh": "https://storage.googleapis.com/agentmesh-releases/agentmesh-0.51.0.tgz"
+  }
+}

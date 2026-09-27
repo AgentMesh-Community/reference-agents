@@ -1,0 +1,102 @@
+{
+  "ring": "v1",
+  "role": "ring-member",
+  "role_version": 1,
+  "mode": "fixed",
+  "about": "The seven cases of the Ring member conformance check. P and N are two test peers, C is the member under test, R is the test runner. Each route is signed by R unless the case says otherwise. {framework} is the member's framework name.",
+  "cases": [
+    {
+      "id": "passes-on-correct-hop",
+      "route": ["P", "C", "N"],
+      "hop": 1,
+      "sent_by": "P",
+      "expect": {
+        "answer": { "status": "completed", "output": { "ok": true } },
+        "then": {
+          "to": "N",
+          "offering": "ring.pass",
+          "hop": 2,
+          "from": "C",
+          "story_length": 2,
+          "last_entry": { "by": "C", "framework": "{framework}", "line": "{framework}:1", "tokens_in": 0, "tokens_out": 0 }
+        }
+      }
+    },
+    {
+      "id": "refuses-bad-signature",
+      "route": ["P", "C", "N"],
+      "hop": 1,
+      "sent_by": "P",
+      "signed_by": "a key that is not R's",
+      "expect": { "answer": { "status": "rejected", "message": "route signature invalid" }, "then": "nothing is sent" }
+    },
+    {
+      "id": "refuses-wrong-sender",
+      "route": ["P", "C", "N"],
+      "hop": 1,
+      "sent_by": "N",
+      "expect": { "answer": { "status": "rejected", "message": "wrong sender" }, "then": "nothing is sent" }
+    },
+    {
+      "id": "refuses-wrong-hop",
+      "route": ["P", "C", "N"],
+      "hop": 0,
+      "sent_by": "R",
+      "expect": { "answer": { "status": "rejected", "message": "wrong hop" }, "then": "nothing is sent" }
+    },
+    {
+      "id": "forwards-to-next-member",
+      "route": ["C", "P", "N"],
+      "hop": 0,
+      "sent_by": "R",
+      "expect": {
+        "answer": { "status": "completed", "output": { "ok": true } },
+        "then": {
+          "to": "P",
+          "offering": "ring.pass",
+          "hop": 1,
+          "from": "C",
+          "story_length": 1,
+          "last_entry": { "by": "C", "framework": "{framework}", "line": "{framework}:0", "tokens_in": 0, "tokens_out": 0 },
+          "and_nothing_to": ["N", "R"]
+        }
+      }
+    },
+    {
+      "id": "sends-done-when-last",
+      "route": ["P", "C"],
+      "hop": 1,
+      "sent_by": "P",
+      "expect": {
+        "answer": { "status": "completed", "output": { "ok": true } },
+        "then": {
+          "to": "R",
+          "offering": "ring.done",
+          "hop": 1,
+          "from": "C",
+          "story_length": 2,
+          "last_entry": { "by": "C", "framework": "{framework}", "line": "{framework}:1", "tokens_in": 0, "tokens_out": 0 }
+        }
+      }
+    },
+    {
+      "id": "declares-live-models",
+      "request": { "offering": "ring.about", "sent_by": "R", "input": {} },
+      "expect": {
+        "answer": {
+          "status": "completed",
+          "output": {
+            "ring": "v1",
+            "role": "ring-member",
+            "role_version": 1,
+            "handle": "C",
+            "framework": "{framework}",
+            "via": "gateway or harness",
+            "live_models": "a list of model ids or patterns (may be empty for a harness member)",
+            "tags": "ring-via:{via} and one ring-model:{pattern} per entry of live_models"
+          }
+        }
+      }
+    }
+  ]
+}

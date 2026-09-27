@@ -1,0 +1,3 @@
+# The AgentMesh Python SDK, pinned to a commit (it is not on PyPI yet).
+agentmesh[websocket] @ git+https://github.com/AgentMesh-Community/agentmesh-python@69adadd01623568054a78fa6064945c21b7586ad
+crewai==1.15.22

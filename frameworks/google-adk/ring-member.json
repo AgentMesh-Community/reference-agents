@@ -1,0 +1,5 @@
+{
+  "handle": "adk.demo@agentmesh.ai",
+  "framework": "adk",
+  "start": "python agent.py"
+}

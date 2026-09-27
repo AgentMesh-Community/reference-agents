@@ -1,0 +1,5 @@
+{
+  "handle": "claude-code.demo@agentmesh.ai",
+  "framework": "claude-code",
+  "start": "node agent.mjs"
+}

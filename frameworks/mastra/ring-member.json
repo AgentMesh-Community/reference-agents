@@ -1,0 +1,5 @@
+{
+  "handle": "mastra.demo@agentmesh.ai",
+  "framework": "mastra",
+  "start": "node agent.mjs"
+}

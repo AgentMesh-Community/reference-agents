@@ -1,0 +1,5 @@
+{
+  "handle": "langchain.demo@agentmesh.ai",
+  "framework": "langchain",
+  "start": "python agent.py"
+}

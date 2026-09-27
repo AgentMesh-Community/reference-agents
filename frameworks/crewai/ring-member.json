@@ -1,0 +1,5 @@
+{
+  "handle": "crewai.demo@agentmesh.ai",
+  "framework": "crewai",
+  "start": "python agent.py"
+}

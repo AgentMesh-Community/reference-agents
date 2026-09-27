@@ -1,0 +1,8 @@
+.agentmesh/
+*.creds
+*.seed
+agentmesh-credentials.json
+.env
+__pycache__/
+.venv/
+venv/
