@@ -70,4 +70,5 @@ await runMember({
   // its card, and a runner leaves it out of every live lap.
   liveModels: hasAnthropic ? ["anthropic/*"] : ["none"],
   description: "A Ring member whose harness is Claude Code: adds one line to a relay story and hands it on.",
+  source: "https://github.com/AgentMesh-Community/reference-agents/tree/main/harnesses/claude-code",
 });

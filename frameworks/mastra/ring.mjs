@@ -207,11 +207,39 @@ export function canUse(model, liveModels) {
 /** The declaration as the ring.pass offering's tags on the card (spec section 7). */
 export const passTags = (liveModels, via) => [`ring-via:${via}`, ...liveModels.map((m) => `ring-model:${m}`)];
 
+export const RING_PAGE = "https://agentmesh.ai/ring.html";
+
+/** File this agent's Agent Descriptor at the registry, signed by its own key.
+ *  The registry keeps it, and the AgentMesh AgentDoc for this agent is
+ *  assembled from it. Best effort: the member works the same without it. */
+async function fileDescriptor(mesh, handle, does, offerings) {
+  const body = {
+    format: "agent-descriptor-v1",
+    agent_version: "1.0.0",
+    subject: { id: mesh.id, handle },
+    does,
+    interaction: "service",
+    role: "ring-member",
+    offerings: offerings.map((o) => ({ id: o.id, name: o.name, does: o.description })),
+    refusals: "Refuses a pass whose route the runner did not sign, one that is not its turn, and one from anybody but the member before it on the route.",
+  };
+  const sig = mesh.signDetached(`descriptor-statement-v1\n${canonicalJSON(body)}`);
+  const doc = { ...body, signatures: [{ tag: "descriptor-statement-v1", by: mesh.id, sig }] };
+  try {
+    await mesh.serviceRequest("mesh.registry.descriptor.put", { descriptor: Buffer.from(JSON.stringify(doc)).toString("base64") }, 10_000);
+    log("descriptor filed at the registry");
+  } catch (err) {
+    log(`descriptor not filed (${err?.message ?? err}); the member works the same without it`);
+  }
+}
+
 /** `liveModels` and `via` are the declaration (spec section 7): the model ids
  *  this member can write with in live mode (["*"] is any model the gateway
- *  serves, [] sits out every live lap), and whether its words come through
- *  the gateway or from a harness with a model of its own. */
-export async function runMember({ framework, writeLine, description, liveModels = ["*"], via = "gateway" }) {
+ *  serves, ["none"] sits out every live lap), and whether its words come
+ *  through the gateway or from a harness with a model of its own. `source`
+ *  is where its code is, for its listing. */
+export async function runMember({ framework, writeLine, description, liveModels = ["*"], via = "gateway", source = "" }) {
+  const listed = `${description}${source ? ` Source: ${source}.` : ""} Watch the laps: ${RING_PAGE}.`;
   const handle = String(process.env.RING_HANDLE ?? "").trim().toLowerCase();
   if (!handle) throw new Error("Set RING_HANDLE to this member's handle, for example mastra.demo@agentmesh.ai.");
   const runner = String(process.env.RING_RUNNER ?? DEFAULT_RUNNER).trim().toLowerCase();
@@ -295,18 +323,20 @@ export async function runMember({ framework, writeLine, description, liveModels 
   const tags = passTags(liveModels, via);
   mesh.onRequest("ring.about", () => ({ ring: "v1", role: "ring-member", role_version: 1, handle, framework, via, live_models: liveModels, tags }));
 
+  const offerings = [
+    { id: "ring.pass", name: "Ring pass", tags, description: "Takes a Ring v1 pass, adds one line to the story and hands it on (role ring-member v1)." },
+    { id: "ring.about", name: "Ring member facts", description: "Says which framework this member is and which models it can write with in live laps." },
+  ];
   await mesh.register({
     name: handle.split(".")[0],
-    description,
-    offerings: [
-      { id: "ring.pass", name: "Ring pass", tags, description: "Takes a Ring v1 pass, adds one line to the story and hands it on (role ring-member v1)." },
-      { id: "ring.about", name: "Ring member facts", description: "Says which framework this member is and which models it can write with in live laps." },
-    ],
+    description: listed,
+    offerings,
     // Public, so the runner can find this member's key in the registry.
     visibility: "public",
     meta: { framework, roles: ["ring-member@1"] },
   });
   log(`ring member ready: ${handle} (${framework}) as ${mesh.id}`);
+  if (!local) void fileDescriptor(mesh, handle, listed, offerings);
 
   if (process.env.PORT) {
     createServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("ring member\n"); })

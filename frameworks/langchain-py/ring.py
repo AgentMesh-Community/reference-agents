@@ -240,14 +240,47 @@ def pass_tags(live_models: list[str], via: str) -> list[str]:
     return [f"ring-via:{via}"] + [f"ring-model:{m}" for m in live_models]
 
 
+RING_PAGE = "https://agentmesh.ai/ring.html"
+
+
+async def file_descriptor(mesh: Any, handle: str, does: str, offerings: list[dict[str, Any]]) -> None:
+    """File this agent's Agent Descriptor at the registry, signed by its own key.
+
+    The registry keeps it, and the AgentMesh AgentDoc for this agent is
+    assembled from it. Best effort: the member works the same without it.
+    """
+    body = {
+        "format": "agent-descriptor-v1",
+        "agent_version": "1.0.0",
+        "subject": {"id": mesh.agent_id, "handle": handle},
+        "does": does,
+        "interaction": "service",
+        "role": "ring-member",
+        "offerings": [{"id": o["id"], "name": o["name"], "does": o["description"]} for o in offerings],
+        "refusals": "Refuses a pass whose route the runner did not sign, one that is not its turn, "
+                    "and one from anybody but the member before it on the route.",
+    }
+    sig = mesh.sign_detached("descriptor-statement-v1\n" + canonical_json(body))
+    doc = {**body, "signatures": [{"tag": "descriptor-statement-v1", "by": mesh.agent_id, "sig": sig}]}
+    raw = json.dumps(doc, separators=(",", ":")).encode("utf-8")
+    try:
+        import base64
+        await mesh.service_request("mesh.registry.descriptor.put", {"descriptor": base64.b64encode(raw).decode("ascii")}, timeout=10.0)
+        log("descriptor filed at the registry")
+    except Exception as exc:
+        log(f"descriptor not filed ({exc}); the member works the same without it")
+
+
 async def run_member(framework: str, write_line: WriteLine, description: str,
-                     live_models: list[str] | None = None, via: str = "gateway") -> None:
+                     live_models: list[str] | None = None, via: str = "gateway", source: str = "") -> None:
     """Run a Ring member. ``live_models`` and ``via`` are the declaration (spec
     section 7): the model ids this member can write with in live mode (``["*"]``
     is any model the gateway serves), and whether its words come through the
-    gateway or from a harness with a model of its own."""
+    gateway or from a harness with a model of its own. ``source`` is where its
+    code is, for its listing."""
     live_models = list(live_models if live_models is not None else ["*"])
     tags = pass_tags(live_models, via)
+    listed = description + (f" Source: {source}." if source else "") + f" Watch the laps: {RING_PAGE}."
     handle = os.environ.get("RING_HANDLE", "").strip().lower()
     if not handle:
         raise SystemExit("Set RING_HANDLE to this member's handle, for example crewai.demo@agentmesh.ai.")
@@ -339,20 +372,25 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
     async def on_about(_input: Any, _ctx: Any) -> dict[str, Any]:
         return about
 
+    offerings = [
+        {"id": "ring.pass", "name": "Ring pass", "tags": tags,
+         "description": "Takes a Ring v1 pass, adds one line to the story and hands it on (role ring-member v1)."},
+        {"id": "ring.about", "name": "Ring member facts",
+         "description": "Says which framework this member is and which models it can write with in live laps."},
+    ]
     await mesh.register(
         handle.split(".", 1)[0],
-        description=description,
-        offerings=[
-            {"id": "ring.pass", "name": "Ring pass", "tags": tags,
-             "description": "Takes a Ring v1 pass, adds one line to the story and hands it on (role ring-member v1)."},
-            {"id": "ring.about", "name": "Ring member facts",
-             "description": "Says which framework this member is and which models it can write with in live laps."},
-        ],
+        description=listed,
+        offerings=offerings,
         # Public, so the runner can find this member's key in the registry.
         visibility="public",
         meta={"framework": framework, "roles": ["ring-member@1"]},
     )
     log(f"ring member ready: {handle} ({framework}) as {mesh.agent_id}")
+    if not local:
+        t = asyncio.create_task(file_descriptor(mesh, handle, listed, offerings))
+        tasks.add(t)
+        t.add_done_callback(tasks.discard)
     port = os.environ.get("PORT")
     if port:
         await _health(int(port))
@@ -361,11 +399,11 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
 
 
 def main(framework: str, write_line: WriteLine, description: str,
-         live_models: list[str] | None = None, via: str = "gateway") -> None:
+         live_models: list[str] | None = None, via: str = "gateway", source: str = "") -> None:
     if sys.platform == "win32":
         asyncio.set_event_loop_policy(asyncio.WindowsSelectorEventLoopPolicy())
     try:
-        asyncio.run(run_member(framework, write_line, description, live_models, via))
+        asyncio.run(run_member(framework, write_line, description, live_models, via, source))
     except KeyboardInterrupt:
         pass
 

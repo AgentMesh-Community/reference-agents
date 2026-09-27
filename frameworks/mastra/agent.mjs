@@ -71,4 +71,5 @@ await runMember({
   framework: "mastra",
   writeLine,
   description: "A Ring member written with Mastra: adds one line to a relay story and hands it on.",
+  source: "https://github.com/AgentMesh-Community/reference-agents/tree/main/frameworks/mastra",
 });

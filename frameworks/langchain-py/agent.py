@@ -59,4 +59,5 @@ async def write_line(req: LineRequest) -> str:
 
 
 if __name__ == "__main__":
-    main("langchain", write_line, "A Ring member written with LangChain: adds one line to a relay story and hands it on.")
+    main("langchain", write_line, "A Ring member written with LangChain: adds one line to a relay story and hands it on.",
+         source="https://github.com/AgentMesh-Community/reference-agents/tree/main/frameworks/langchain-py")
