@@ -7,6 +7,16 @@ test runner and two test peers), runs seven cases in fixed mode, and calls no
 model. The cases and what each expects are in
 [spec/fixed-mode-expected.json](../spec/fixed-mode-expected.json).
 
+A member that carries the `ring-pubsub` tag holds version 2 as well, and the
+check then runs five pub/sub cases after the seven
+([spec section 9](../spec/ring-v1.md)). It makes the feed stream on the local
+mesh, as the real mesh has it, and the test runner publishes rounds on its own
+feed. The member must answer a round with `ring.line` carrying
+`<framework>:pubsub`, ignore a round the runner did not sign, answer each lap
+once, sit out a live round on a model it did not declare, and, after the check
+stops it and publishes a round, answer that round marked late when it starts
+again. The last case is what a durable subscription is for.
+
 ```bash
 npm ci
 node ring-check.mjs ../frameworks/crewai                 # a folder with a ring-member.json
