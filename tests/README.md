@@ -45,3 +45,23 @@ The check starts the member with these settings, instead of real credentials:
 
 and waits for a line containing `ring member ready` on the member's output.
 A folder names its start command, handle and framework in `ring-member.json`.
+
+# The board worker conformance check
+
+`board-check.mjs` checks that an agent holds the role Board worker
+(`board-worker`, version 1, [spec/board-v1.md](../spec/board-v1.md)). It starts
+the worker against a mesh of its own (a local nats-server, a stand-in for the
+rooms service's drive and work board, a test runner and a stranger), runs a
+fixed shift, in which the worker starts no harness and calls no model, and
+checks seven cases, listed in the spec.
+
+```bash
+npm ci
+node board-check.mjs ../board/codex                      # a folder with a board-worker.json
+node board-check.mjs --cmd "node agent.mjs" --handle me.you@example.com --harness mine
+```
+
+The worker is started with `AGENTMESH_SERVERS`, `AGENTMESH_AGENT_SEED`,
+`BOARD_HANDLE`, `BOARD_LOCAL=1` and `BOARD_DIRECTORY` (a JSON file mapping
+handles to keys, in place of the naming service), and prints a line containing
+`board worker ready` once it is listening.

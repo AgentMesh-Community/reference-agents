@@ -1,0 +1,5 @@
+{
+  "handle": "codex.demo@agentmesh.ai",
+  "harness": "Codex",
+  "start": "node agent.mjs"
+}

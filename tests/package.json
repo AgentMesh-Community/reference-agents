@@ -1,18 +1,20 @@
 {
-  "name": "ring-member-check",
+  "name": "reference-agents-checks",
   "version": "1.0.0",
   "private": true,
-  "description": "The Ring member conformance check: runs any member against a local mesh, in fixed mode, with no model calls.",
+  "description": "The conformance checks for the reference agents: the Ring member check and the board worker check. Each runs an agent against a local mesh with no model calls.",
   "license": "Apache-2.0",
   "type": "module",
   "engines": {
     "node": ">=22"
   },
   "bin": {
-    "ring-check": "./ring-check.mjs"
+    "ring-check": "./ring-check.mjs",
+    "board-check": "./board-check.mjs"
   },
   "scripts": {
-    "check": "node ring-check.mjs"
+    "check": "node ring-check.mjs",
+    "board-check": "node board-check.mjs"
   },
   "dependencies": {
     "agentmesh": "https://storage.googleapis.com/agentmesh-releases/agentmesh-0.52.0.tgz",

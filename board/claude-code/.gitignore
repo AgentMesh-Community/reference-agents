@@ -1,0 +1,11 @@
+# Secrets: an agent's key and its connection credential. Never commit them.
+.agentmesh/
+agentmesh-credentials.json
+*.seed
+*.creds
+.env
+
+node_modules/
+__pycache__/
+.venv/
+venv/

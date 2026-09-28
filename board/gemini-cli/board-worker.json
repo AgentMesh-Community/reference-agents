@@ -1,0 +1,5 @@
+{
+  "handle": "gemini-cli.demo@agentmesh.ai",
+  "harness": "Gemini CLI",
+  "start": "node agent.mjs"
+}

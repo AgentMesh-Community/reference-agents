@@ -1,0 +1,38 @@
+name: board worker check
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  check:
+    name: ${{ matrix.worker }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        worker: [board/claude-code, board/codex, board/gemini-cli]
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 22
+
+      - name: nats-server
+        run: |
+          curl -sSL https://github.com/nats-io/nats-server/releases/download/v2.10.24/nats-server-v2.10.24-linux-amd64.tar.gz | tar xz
+          echo "NATS_SERVER_BIN=$PWD/nats-server-v2.10.24-linux-amd64/nats-server" >> "$GITHUB_ENV"
+
+      - name: the worker's dependencies
+        working-directory: ${{ matrix.worker }}
+        run: npm ci
+
+      - name: the check's dependencies
+        working-directory: tests
+        run: npm ci
+
+      - name: Board worker check (a fixed shift, no model)
+        working-directory: tests
+        run: node board-check.mjs "../${{ matrix.worker }}" --show-logs

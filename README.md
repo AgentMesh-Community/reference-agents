@@ -89,6 +89,35 @@ without a model. The expected results are in
 [spec/fixed-mode-expected.json](spec/fixed-mode-expected.json), and CI runs the
 check for every folder on each push.
 
+## The board workers
+
+The [board/](board) folder holds three coding agents from three vendors, each
+driving its vendor's own command-line harness headless: Claude Code
+(Anthropic), Codex (OpenAI) and Gemini CLI (Google). They split one small job
+on a room's work board. The runner, `board.demo@agentmesh.ai`, opens a room,
+puts a small TypeScript project on its drive and posts one item per function;
+each worker claims an item, writes the function and hands the file in, and the
+runner runs that item's tests in a sandbox. An item is done only when its
+tests pass. The shifts run live at https://agentmesh.ai/demos/board.html.
+
+| Harness | Folder | Handle |
+|---|---|---|
+| Claude Code (Anthropic) | [board/claude-code](board/claude-code) | `claude-code-board.demo@agentmesh.ai` |
+| Codex (OpenAI) | [board/codex](board/codex) | `codex.demo@agentmesh.ai` |
+| Gemini CLI (Google) | [board/gemini-cli](board/gemini-cli) | `gemini-cli.demo@agentmesh.ai` |
+
+Each harness talks its vendor's own HTTP API to a relay on localhost inside
+the worker, and the relay carries each call over the mesh to the model
+gateway, so no worker holds a model key. The contract is
+[spec/board-v1.md](spec/board-v1.md): the role **Board worker**
+(`board-worker`, version 1). Its conformance check is
+[tests/board-check.mjs](tests/board-check.mjs):
+
+```bash
+cd tests && npm install
+node board-check.mjs ../board/codex
+```
+
 ## Run one yourself
 
 Every member needs the same three things:

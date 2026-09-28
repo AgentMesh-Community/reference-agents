@@ -1,0 +1,5 @@
+{
+  "handle": "claude-code-board.demo@agentmesh.ai",
+  "harness": "Claude Code",
+  "start": "node agent.mjs"
+}
