@@ -176,6 +176,17 @@ that the member:
 It makes no model calls. `spec/fixed-mode-expected.json` holds the expected
 result of each case.
 
+A member that carries the `ring-pubsub` tag (section 9) also runs five pub/sub
+cases, with the test runner publishing rounds on its own feed on the local
+mesh. The member:
+
+8. answers a round with `ring.line` carrying `<framework>:pubsub`;
+9. ignores a round whose envelope is not from the runner's key;
+10. answers each lap once, even when the round comes twice;
+11. sits out a live round on a model it did not declare;
+12. answers a round published while it was stopped when it starts again, with
+    `"late": true` (its subscription is durable).
+
 ## 7. Which models a member can write with
 
 Each member declares which models it can write with in live mode, and a runner
@@ -208,11 +219,53 @@ A member also answers a `ring.about` request with the same facts, which is how
 the conformance check reads them without a registry:
 
 ```json
-{ "ring": "v1", "role": "ring-member", "role_version": 1,
+{ "ring": "v1", "role": "ring-member", "role_version": 2,
+  "transports": ["point-to-point", "pubsub"],
   "handle": "crewai.demo@agentmesh.ai", "framework": "crewai",
   "via": "gateway", "live_models": ["*"],
-  "tags": ["ring-via:gateway", "ring-model:*"] }
+  "tags": ["ring-via:gateway", "ring-model:*", "ring-pubsub"] }
 ```
 
 A member registers as `public` (or `unlisted`), never `private`: the runner
 finds each member's key in the registry.
+
+## 8. The credential
+
+Each member renews its connection credential when it starts, so the
+credential carries what the mesh grants today; renewal needs only HTTPS. A
+member keeps the saved credential when renewal fails and it is still good.
+
+## 9. Pub/sub rounds (role ring-member v2)
+
+A lap can also go round pub/sub. In point to point the story passes from one
+named member to the next on the signed route. In pub/sub the runner publishes
+one event and every subscribed member answers at once, so the lines land side
+by side.
+
+- **The round.** The runner publishes one event per round on its own feed,
+  `mesh.feed.<runner key>.ring-round` (feed topic `ring-round`, kind
+  `stream`): an emit envelope signed by the runner's key whose payload is
+  `{ topic, kind, data }`, with `data`
+  `{ "ring": "v1", "mode": "pubsub", "lap_id", "round": 1, "lap": { "model", "mode", "opening", "started_at" } }`.
+- **Taking part.** A member carries the tag `ring-pubsub` on its `ring.pass`
+  offering and follows that feed, where the runner key is what
+  `ring.demo@agentmesh.ai` resolves to. It follows it durably
+  (`subscribeFeed(runnerKey, "ring-round", handler, { durable: true })` in
+  the TypeScript SDK, `subscribe_feed(..., durable=True)` in the Python SDK),
+  so a round published while it was stopped reaches it when it starts again.
+  A member whose mesh refuses the durable subscription follows the feed live
+  and says so in its log.
+- **The answer.** A member takes a round only when the envelope is from the
+  runner's key (the SDK has verified its signature), sits out a live round on
+  a model it did not declare (section 7), and otherwise sends `ring.line` to
+  the runner at once:
+  `{ "lap_id", "round", "by", "framework", "line", "at", "ms", "tokens_in", "tokens_out", "late" }`.
+  In a fixed round `line` is exactly `<framework>:pubsub` with tokens 0 and 0;
+  in a live round it is one sentence written from the opening, through the
+  gateway (or the harness's own model). `late` is true when the round was
+  published before the member's process started, which means it was stopped
+  when the round went out. It answers each lap once, and does not answer a
+  round published more than an hour ago.
+- **The runner** takes lines as they arrive and closes the lap when every
+  subscribed member that was online has answered, or after two minutes. A
+  line after the close is recorded as late.

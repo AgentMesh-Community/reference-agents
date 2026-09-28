@@ -184,12 +184,18 @@ async function connectMesh() {
   }
   const c = await loadCredentials();
   const agentId = keyPairFromSeed(c.agentSeed).getPublicKey();
-  // A credential that lapsed while this agent was stopped is renewed first:
-  // renewal proves the keys over HTTPS and needs no live connection.
+  // The credential is renewed at every start, so it carries what the mesh
+  // grants today (the durable feed consumer the pub/sub rounds need came after
+  // some credentials were minted). Renewal proves the keys over HTTPS and needs
+  // no live connection. A failed renewal falls back to the saved credential
+  // while it is still good.
   const renewer = new CredentialRenewer({ apiBase: c.apiBase, jwt: c.jwt, nodeSeed: c.seed, agents: [{ id: agentId, seed: c.agentSeed }] });
-  if (renewer.status().expired) {
-    log("the saved credential has lapsed; renewing it");
+  try {
     c.jwt = (await renewer.renew()).jwt;
+    log("credential renewed at start");
+  } catch (err) {
+    if (renewer.status().expired) throw err;
+    log(`credential not renewed at start (${err?.message ?? err}); using the saved one`);
   }
   const chosen = String(process.env.AGENTMESH_SERVERS ?? "").split(",").map((s) => s.trim()).filter(Boolean);
   return AgentMesh.connect(pickServers(chosen.length ? chosen : c.servers), {
@@ -217,8 +223,17 @@ export function canUse(model, liveModels) {
   });
 }
 
-/** The declaration as the ring.pass offering's tags on the card (spec section 7). */
-export const passTags = (liveModels, via) => [`ring-via:${via}`, ...liveModels.map((m) => `ring-model:${m}`)];
+/** The tag that says this member answers pub/sub rounds (role ring-member v2). */
+export const PUBSUB_TAG = "ring-pubsub";
+
+/** The declaration as the ring.pass offering's tags on the card (spec section 7),
+ *  and the pub/sub tag (spec section 9). */
+export const passTags = (liveModels, via) => [`ring-via:${via}`, ...liveModels.map((m) => `ring-model:${m}`), PUBSUB_TAG];
+
+/** The runner's round feed (spec section 9): mesh.feed.<runner key>.ring-round. */
+export const ROUND_TOPIC = "ring-round";
+/** A round older than this is not answered: the runner takes no line for it. */
+const ROUND_LATE_WINDOW_MS = 60 * 60_000;
 
 export const RING_PAGE = "https://agentmesh.ai/ring.html";
 
@@ -263,14 +278,16 @@ export async function runMember({ framework, writeLine, description, liveModels 
     createServer((_req, res) => { res.writeHead(200, { "content-type": "text/plain" }); res.end("ring member\n"); })
       .listen(Number(process.env.PORT), "0.0.0.0", () => log(`health checks answered on port ${process.env.PORT}`));
   }
+  // When this process started: a round published before it is one this
+  // member missed while it was not running, and its answer says late.
+  const startedAt = Date.now();
   const mesh = await connectMesh();
   const keys = new Keys(mesh, local ? process.env.RING_DIRECTORY : null);
   const seen = new Map();
 
-  async function carryOn(p) {
-    const lap = p.lap && typeof p.lap === "object" ? p.lap : {};
-    const { route, hop } = p;
-    const story = (Array.isArray(p.story) ? p.story : []).filter((e) => e && typeof e === "object");
+  /** This member's line for a lap: one sentence through the gateway (or its
+   *  harness) in a live lap, `fixedLine` in a fixed one. */
+  async function makeLine(lap, lapId, story, fixedLine) {
     const t0 = Date.now();
     let line;
     let tokensIn = 0;
@@ -281,7 +298,7 @@ export async function runMember({ framework, writeLine, description, liveModels 
       // arrives anyway, the story still goes on.
       line = `(${framework} cannot write with ${model} and passes the story on)`;
     } else if (lap.mode === "live") {
-      const gateway = new Gateway(mesh, (await keys.of(gatewayHandle)) ?? gatewayHandle, String(p.lap_id), model);
+      const gateway = new Gateway(mesh, (await keys.of(gatewayHandle)) ?? gatewayHandle, String(lapId), model);
       const { system, user } = prompts(framework, String(lap.opening ?? ""), story);
       tokensIn = null;
       try {
@@ -292,14 +309,82 @@ export async function runMember({ framework, writeLine, description, liveModels 
         line = tidy(typeof r === "string" ? r : r?.text);
         if (r && typeof r === "object") { tokensIn = Number(r.tokens_in) || 0; tokensOut = Number(r.tokens_out) || 0; }
       } catch (err) {
-        log(`lap ${p.lap_id}: the line could not be written: ${err?.message ?? err}`);
+        log(`lap ${lapId}: the line could not be written: ${err?.message ?? err}`);
         line = `(${framework} could not write a line: ${String(err?.message ?? err).slice(0, 120)})`;
       }
       if (tokensIn === null) { tokensIn = gateway.tokensIn; tokensOut = gateway.tokensOut; }
     } else {
-      line = `${framework}:${hop}`;
+      line = fixedLine;
     }
-    const entry = { by: handle, framework, line, at: nowIso(), ms: Date.now() - t0, tokens_in: tokensIn, tokens_out: tokensOut };
+    return { line, ms: Date.now() - t0, tokensIn, tokensOut };
+  }
+
+  // ── pub/sub rounds (spec section 9, role ring-member v2) ──
+  const answered = new Map();
+
+  async function answerRound(payload, env, runnerKey) {
+    // Only the runner's own signed round: the SDK has verified the signature
+    // against env.from, and env.from must be the key the runner's name resolves to.
+    if (env?.from !== runnerKey) return;
+    const d = payload?.data;
+    if (!d || typeof d !== "object" || d.ring !== "v1" || d.mode !== "pubsub" || typeof d.lap_id !== "string" || !Number.isInteger(d.round)) return;
+    const lap = d.lap && typeof d.lap === "object" ? d.lap : {};
+    const key = `${d.lap_id}|${d.round}`;
+    if (answered.has(key)) return; // each lap once
+    answered.set(key, Date.now());
+    for (const [k, at] of answered) if (Date.now() - at > 2 * ROUND_LATE_WINDOW_MS) answered.delete(k);
+    const published = Date.parse(env.ts ?? lap.started_at ?? "");
+    if (Number.isFinite(published) && Date.now() - published > ROUND_LATE_WINDOW_MS) {
+      log(`lap ${d.lap_id}: round published over an hour ago; not answered`);
+      return;
+    }
+    if (lap.mode === "live" && !canUse(String(lap.model ?? ""), liveModels)) {
+      log(`lap ${d.lap_id}: sits out the pub/sub round (cannot write with ${lap.model})`);
+      return;
+    }
+    const late = Number.isFinite(published) && published < startedAt;
+    const { line, ms, tokensIn, tokensOut } = await makeLine(lap, d.lap_id, [], `${framework}:pubsub`);
+    const answer = { lap_id: d.lap_id, round: d.round, by: handle, framework, line, at: nowIso(), ms, tokens_in: tokensIn, tokens_out: tokensOut, late };
+    for (const attempt of [1, 2, 3]) {
+      try {
+        const r = await mesh.request(runnerKey, "ring.line", answer, { timeout_ms: 30_000 });
+        const out = r.payload?.output;
+        log(`lap ${d.lap_id}: ring.line sent${late ? " (late)" : ""}; the runner said ${JSON.stringify(out ?? r.payload?.status).slice(0, 160)}`);
+        return;
+      } catch (err) {
+        log(`lap ${d.lap_id}: ring.line failed (try ${attempt}): ${err?.message ?? err}`);
+        await sleep(3000 * attempt);
+      }
+    }
+  }
+
+  /** Follow the runner's round feed, durably when the mesh allows it, so a
+   *  round published while this member was stopped is answered on its return. */
+  async function followRounds() {
+    const runnerKey = await keys.of(runner);
+    if (!runnerKey) {
+      log(`${runner} does not resolve yet; following pub/sub rounds is tried again in a minute`);
+      setTimeout(() => { followRounds().catch((err) => log(`pub/sub rounds: ${err?.message ?? err}`)); }, 60_000);
+      return;
+    }
+    const onRound = (payload, env) => {
+      answerRound(payload, env, runnerKey).catch((err) => log(`a pub/sub round could not be answered: ${err?.message ?? err}`));
+    };
+    try {
+      const sub = await mesh.subscribeFeed(runnerKey, ROUND_TOPIC, onRound, { durable: true });
+      log(`following pub/sub rounds durably on ${sub.subject} (consumer ${sub.durable})`);
+    } catch (err) {
+      mesh.subscribeFeed(runnerKey, ROUND_TOPIC, onRound);
+      log(`following pub/sub rounds live only, so a round sent while this member is stopped is missed: ${err?.message ?? err}`);
+    }
+  }
+
+  async function carryOn(p) {
+    const lap = p.lap && typeof p.lap === "object" ? p.lap : {};
+    const { route, hop } = p;
+    const story = (Array.isArray(p.story) ? p.story : []).filter((e) => e && typeof e === "object");
+    const { line, ms, tokensIn, tokensOut } = await makeLine(lap, p.lap_id, story, `${framework}:${hop}`);
+    const entry = { by: handle, framework, line, at: nowIso(), ms, tokens_in: tokensIn, tokens_out: tokensOut };
     const next = { ...p, story: [...story, entry] };
     let target = runner;
     let offering = "ring.done";
@@ -338,19 +423,20 @@ export async function runMember({ framework, writeLine, description, liveModels 
   });
 
   const tags = passTags(liveModels, via);
-  mesh.onRequest("ring.about", () => ({ ring: "v1", role: "ring-member", role_version: 1, handle, framework, via, live_models: liveModels, tags }));
+  mesh.onRequest("ring.about", () => ({ ring: "v1", role: "ring-member", role_version: 2, transports: ["point-to-point", "pubsub"], handle, framework, via, live_models: liveModels, tags }));
 
   const offerings = [
-    { id: "ring.pass", name: "Ring pass", tags, description: "Takes a Ring v1 pass, adds one line to the story and hands it on (role ring-member v1)." },
+    { id: "ring.pass", name: "Ring pass", tags, description: "Takes a Ring v1 pass, adds one line to the story and hands it on; also answers the runner's pub/sub rounds with ring.line (role ring-member v2)." },
     { id: "ring.about", name: "Ring member facts", description: "Says which framework this member is and which models it can write with in live laps." },
   ];
+  await followRounds();
   await mesh.register({
     name: handle.split(".")[0],
     description: listed,
     offerings,
     // Public, so the runner can find this member's key in the registry.
     visibility: "public",
-    meta: { framework, roles: ["ring-member@1"] },
+    meta: { framework, roles: ["ring-member@1", "ring-member@2"] },
   });
   log(`ring member ready: ${handle} (${framework}) as ${mesh.id}`);
   if (!local) void fileDescriptor(mesh, handle, listed, offerings);

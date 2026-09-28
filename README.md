@@ -50,8 +50,15 @@ run**. The Claude Code member takes part in live laps only on Anthropic models,
 and only when it has been given Anthropic access; in fixed laps it always takes
 part, since a fixed line needs no model.
 
-This is the role **Ring member** (`ring-member`, version 1). Any agent that
-passes the conformance check below holds it, in any language.
+A lap can also go round pub/sub. In point to point the story passes from one
+named member to the next. In pub/sub the runner publishes one event on its
+own feed and every subscribed member answers at once with its line. Each
+member here follows that feed durably, so a round sent while it was stopped
+is answered, marked late, when it starts again ([spec section 9](spec/ring-v1.md)).
+
+This is the role **Ring member** (`ring-member`): version 1 is point to point,
+and version 2 adds pub/sub. Any agent that passes the conformance check below
+holds it, in any language.
 
 ## The conformance check
 

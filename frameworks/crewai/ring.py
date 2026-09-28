@@ -35,6 +35,7 @@ from typing import Any, Awaitable, Callable
 
 from agentmesh import Credentials, RejectedError, connect
 from agentmesh.canonical import canonical_json
+from agentmesh.credential import RenewalAgent, renew_node_credential
 from agentmesh.keys import b64url_decode, verify_signature
 
 ROUTE_TAG = "agentmesh-ring-route-v1\n"
@@ -46,6 +47,16 @@ MAX_WORDS = 40
 
 def now_iso() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="milliseconds").replace("+00:00", "Z")
+
+
+def _epoch(iso: Any) -> float | None:
+    """An ISO time as seconds since the epoch, or None."""
+    if not isinstance(iso, str) or not iso:
+        return None
+    try:
+        return datetime.fromisoformat(iso.replace("Z", "+00:00")).timestamp()
+    except ValueError:
+        return None
 
 
 def log(msg: str) -> None:
@@ -231,13 +242,35 @@ async def _credentials() -> tuple[Credentials, str]:
             f = folder / name
             f.write_text(str(data[key]).strip() + "\n", encoding="utf-8")
             os.chmod(f, 0o600)
-        (folder / "mesh.json").write_text(json.dumps({"servers": data.get("servers") or [], "api_base": data.get("api_base")}), encoding="utf-8")
-        return Credentials.load(folder), str(folder)
+        (folder / "mesh.json").write_text(json.dumps({"servers": data.get("servers") or [], "api_base": data.get("api_base") or DEFAULT_API_BASE}), encoding="utf-8")
+        return await _renewed(Credentials.load(folder), str(folder)), str(folder)
     folder = os.environ.get("AGENTMESH_FOLDER")
     if not folder:
         raise SystemExit("Set AGENTMESH_CREDENTIALS_FILE or AGENTMESH_FOLDER (see this folder's README: python join.py am_...).")
     folder = str(Path(folder).expanduser())
-    return Credentials.load(folder), folder
+    return await _renewed(Credentials.load(folder), folder), folder
+
+
+DEFAULT_API_BASE = "https://api.agentmesh.ai"
+
+
+async def _renewed(creds: Credentials, folder: str) -> Credentials:
+    """Renew the credential at every start, so it carries what the mesh grants
+    today (the durable feed consumer the pub/sub rounds need came after some
+    credentials were minted). Renewal proves the keys over HTTPS and needs no
+    live connection. A failed renewal keeps the saved credential; connect()
+    renews one that has lapsed on its own."""
+    if not creds.jwt:
+        return creds
+    try:
+        fresh = await renew_node_credential(
+            creds.api_base or DEFAULT_API_BASE, creds.connection_seed or creds.agent_seed,
+            [RenewalAgent(id=creds.agent_id, seed=creds.agent_seed)])
+        creds.update_jwt(folder, fresh.jwt, fresh.expires_at)
+        log("credential renewed at start")
+    except Exception as exc:
+        log(f"credential not renewed at start ({exc}); using the saved one")
+    return creds
 
 
 def can_use(model: str, live_models: list[str]) -> bool:
@@ -250,9 +283,18 @@ def can_use(model: str, live_models: list[str]) -> bool:
     return False
 
 
+#: The tag that says this member answers pub/sub rounds (role ring-member v2).
+PUBSUB_TAG = "ring-pubsub"
+#: The runner's round feed (spec section 9): mesh.feed.<runner key>.ring-round.
+ROUND_TOPIC = "ring-round"
+#: A round older than this is not answered: the runner takes no line for it.
+ROUND_LATE_WINDOW_S = 3600
+
+
 def pass_tags(live_models: list[str], via: str) -> list[str]:
-    """The declaration as the ring.pass offering's tags on the card (spec section 7)."""
-    return [f"ring-via:{via}"] + [f"ring-model:{m}" for m in live_models]
+    """The declaration as the ring.pass offering's tags on the card (spec section 7),
+    and the pub/sub tag (spec section 9)."""
+    return [f"ring-via:{via}"] + [f"ring-model:{m}" for m in live_models] + [PUBSUB_TAG]
 
 
 RING_PAGE = "https://agentmesh.ai/ring.html"
@@ -303,6 +345,9 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
     gateway_handle = os.environ.get("RING_GATEWAY", DEFAULT_GATEWAY).strip().lower()
     local = os.environ.get("RING_LOCAL") == "1"
 
+    # When this process started: a round published before it is one this
+    # member missed while it was not running, and its answer says late.
+    started_at = time.time()
     port = os.environ.get("PORT")
     health = asyncio.create_task(_health(int(port))) if port else None
 
@@ -320,14 +365,17 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
     loop = asyncio.get_running_loop()
     seen: dict[str, float] = {}
     tasks: set[asyncio.Task[Any]] = set()
-    about = {"ring": "v1", "role": "ring-member", "role_version": 1, "handle": handle,
-             "framework": framework, "via": via, "live_models": live_models, "tags": tags}
+    about = {"ring": "v1", "role": "ring-member", "role_version": 2, "transports": ["point-to-point", "pubsub"],
+             "handle": handle, "framework": framework, "via": via, "live_models": live_models, "tags": tags}
 
-    async def carry_on(p: dict[str, Any]) -> None:
-        lap = p.get("lap") if isinstance(p.get("lap"), dict) else {}
-        route = p["route"]
-        hop = p["hop"]
-        story = [e for e in (p.get("story") or []) if isinstance(e, dict)]
+    def spawn(coro: Awaitable[Any]) -> None:
+        t = asyncio.ensure_future(coro)
+        tasks.add(t)
+        t.add_done_callback(tasks.discard)
+
+    async def make_line(lap: dict[str, Any], lap_id: str, story: list[dict[str, Any]], fixed_line: str) -> tuple[str, int, int, int]:
+        """This member's line for a lap: one sentence through the gateway in a
+        live lap, ``fixed_line`` in a fixed one. Returns (line, ms, tokens in, out)."""
         t0 = time.monotonic()
         tokens_in = tokens_out = 0
         model = str(lap.get("model") or "")
@@ -337,18 +385,90 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
             line = f"({framework} cannot write with {model} and passes the story on)"
         elif lap.get("mode") == "live":
             gw_key = await keys.of(gateway_handle)
-            gw = Gateway(mesh, gw_key or gateway_handle, str(p.get("lap_id")), model, loop)
+            gw = Gateway(mesh, gw_key or gateway_handle, str(lap_id), model, loop)
             system, user = prompts(framework, str(lap.get("opening") or ""), story)
             try:
                 line = tidy(await write_line(LineRequest(framework, handle, str(lap.get("opening") or ""), story, gw, system, user)))
             except Exception as exc:  # the lap goes on; the line says what happened
-                log(f"lap {p.get('lap_id')}: the line could not be written: {exc}")
+                log(f"lap {lap_id}: the line could not be written: {exc}")
                 line = f"({framework} could not write a line: {str(exc)[:120]})"
             tokens_in, tokens_out = gw.tokens_in, gw.tokens_out
         else:
-            line = f"{framework}:{hop}"
+            line = fixed_line
+        return line, int((time.monotonic() - t0) * 1000), tokens_in, tokens_out
+
+    # ── pub/sub rounds (spec section 9, role ring-member v2) ──
+    answered: dict[str, float] = {}
+
+    async def answer_round(payload: Any, env: dict[str, Any], runner_key: str) -> None:
+        # Only the runner's own signed round: the SDK has verified the
+        # signature against env["from"], which must be the runner's key.
+        if env.get("from") != runner_key:
+            return
+        d = payload.get("data") if isinstance(payload, dict) else None
+        if (not isinstance(d, dict) or d.get("ring") != "v1" or d.get("mode") != "pubsub"
+                or not isinstance(d.get("lap_id"), str) or not isinstance(d.get("round"), int)):
+            return
+        lap = d.get("lap") if isinstance(d.get("lap"), dict) else {}
+        key = f"{d['lap_id']}|{d['round']}"
+        if key in answered:  # each lap once
+            return
+        answered[key] = time.time()
+        for k in [k for k, at in answered.items() if time.time() - at > 2 * ROUND_LATE_WINDOW_S]:
+            answered.pop(k, None)
+        published = _epoch(env.get("ts")) or _epoch(lap.get("started_at"))
+        if published is not None and time.time() - published > ROUND_LATE_WINDOW_S:
+            log(f"lap {d['lap_id']}: round published over an hour ago; not answered")
+            return
+        if lap.get("mode") == "live" and not can_use(str(lap.get("model") or ""), live_models):
+            log(f"lap {d['lap_id']}: sits out the pub/sub round (cannot write with {lap.get('model')})")
+            return
+        late = published is not None and published < started_at
+        line, ms, tokens_in, tokens_out = await make_line(lap, d["lap_id"], [], f"{framework}:pubsub")
+        answer = {"lap_id": d["lap_id"], "round": d["round"], "by": handle, "framework": framework, "line": line,
+                  "at": now_iso(), "ms": ms, "tokens_in": tokens_in, "tokens_out": tokens_out, "late": late}
+        for attempt in (1, 2, 3):
+            try:
+                r = await mesh.request(runner_key, "ring.line", answer, timeout=30.0)
+                said = json.dumps(r.output if r.output is not None else r.status)[:160]
+                log(f"lap {d['lap_id']}: ring.line sent{' (late)' if late else ''}; the runner said {said}")
+                return
+            except Exception as exc:
+                log(f"lap {d['lap_id']}: ring.line failed (try {attempt}): {exc}")
+                await asyncio.sleep(3 * attempt)
+
+    async def follow_rounds() -> None:
+        """Follow the runner's round feed, durably when the mesh allows it, so a
+        round published while this member was stopped is answered on its return."""
+        runner_key = await keys.of(runner)
+        if not runner_key:
+            log(f"{runner} does not resolve yet; following pub/sub rounds is tried again in a minute")
+
+            async def later() -> None:
+                await asyncio.sleep(60)
+                await follow_rounds()
+
+            spawn(later())
+            return
+
+        def on_round(payload: Any, env: dict[str, Any]) -> None:
+            spawn(answer_round(payload, env, runner_key))
+
+        try:
+            sub = await mesh.subscribe_feed(runner_key, ROUND_TOPIC, on_round, durable=True)
+            log(f"following pub/sub rounds durably on {sub.subject} (consumer {sub.durable})")
+        except Exception as exc:
+            await mesh.subscribe_feed(runner_key, ROUND_TOPIC, on_round)
+            log(f"following pub/sub rounds live only, so a round sent while this member is stopped is missed: {exc}")
+
+    async def carry_on(p: dict[str, Any]) -> None:
+        lap = p.get("lap") if isinstance(p.get("lap"), dict) else {}
+        route = p["route"]
+        hop = p["hop"]
+        story = [e for e in (p.get("story") or []) if isinstance(e, dict)]
+        line, ms, tokens_in, tokens_out = await make_line(lap, str(p.get("lap_id")), story, f"{framework}:{hop}")
         entry = {"by": handle, "framework": framework, "line": line, "at": now_iso(),
-                 "ms": int((time.monotonic() - t0) * 1000), "tokens_in": tokens_in, "tokens_out": tokens_out}
+                 "ms": ms, "tokens_in": tokens_in, "tokens_out": tokens_out}
         nxt = {**p, "story": story + [entry]}
         members = route["members"]
         if hop + 1 < len(members):
@@ -392,17 +512,19 @@ async def run_member(framework: str, write_line: WriteLine, description: str,
 
     offerings = [
         {"id": "ring.pass", "name": "Ring pass", "tags": tags,
-         "description": "Takes a Ring v1 pass, adds one line to the story and hands it on (role ring-member v1)."},
+         "description": "Takes a Ring v1 pass, adds one line to the story and hands it on; also answers the "
+                        "runner's pub/sub rounds with ring.line (role ring-member v2)."},
         {"id": "ring.about", "name": "Ring member facts",
          "description": "Says which framework this member is and which models it can write with in live laps."},
     ]
+    await follow_rounds()
     await mesh.register(
         handle.split(".", 1)[0],
         description=listed,
         offerings=offerings,
         # Public, so the runner can find this member's key in the registry.
         visibility="public",
-        meta={"framework": framework, "roles": ["ring-member@1"]},
+        meta={"framework": framework, "roles": ["ring-member@1", "ring-member@2"]},
     )
     log(f"ring member ready: {handle} ({framework}) as {mesh.agent_id}")
     if not local:

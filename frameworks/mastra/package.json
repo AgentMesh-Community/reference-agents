@@ -12,6 +12,6 @@
   },
   "dependencies": {
     "@mastra/core": "^1.71.0",
-    "agentmesh": "https://storage.googleapis.com/agentmesh-releases/agentmesh-0.51.0.tgz"
+    "agentmesh": "https://storage.googleapis.com/agentmesh-releases/agentmesh-0.52.0.tgz"
   }
 }

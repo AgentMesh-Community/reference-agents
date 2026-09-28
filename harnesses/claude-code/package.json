@@ -11,6 +11,6 @@
     "join": "node join.mjs"
   },
   "dependencies": {
-    "agentmesh": "https://storage.googleapis.com/agentmesh-releases/agentmesh-0.51.0.tgz"
+    "agentmesh": "https://storage.googleapis.com/agentmesh-releases/agentmesh-0.52.0.tgz"
   }
 }

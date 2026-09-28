@@ -4,7 +4,10 @@
 // Runs one member against a mesh of its own: a local nats-server, a test
 // runner signing routes as ring.demo@agentmesh.ai, and two test peers.
 // Fixed mode only, so no model is called. The seven cases and what each
-// expects are in spec/fixed-mode-expected.json.
+// expects are in spec/fixed-mode-expected.json. A member that carries the
+// ring-pubsub tag (role ring-member v2) also runs the five pub/sub cases in
+// spec section 9: the test runner publishes rounds on its own feed, as the
+// real runner does, and the member must answer each with ring.line.
 //
 //   node ring-check.mjs ../frameworks/crewai
 //   node ring-check.mjs --cmd "python my_agent.py" --handle me.you@example.com --framework mine
@@ -35,9 +38,12 @@ import { createServer, connect as tcpConnect } from "node:net";
 import { tmpdir } from "node:os";
 import { join, resolve } from "node:path";
 import { randomUUID } from "node:crypto";
-import { AgentMesh, canonicalJSON, createAgentIdentity, keyPairFromSeed, signTagged } from "agentmesh";
+import { AgentMesh, canonicalJSON, createAgentIdentity, createEnvelope, keyPairFromSeed, signEnvelope, signTagged } from "agentmesh";
+import { connect as natsConnect } from "nats.ws";
 
 const ROUTE_TAG = "agentmesh-ring-route-v1\n";
+const PUBSUB_TAG = "ring-pubsub";
+const ROUND_TOPIC = "ring-round";
 const RUNNER = "ring.demo@agentmesh.ai";
 const GATEWAY = "models.platform@agentmesh.ai";
 const PEER_A = "peer-a.ring-check@example.com";
@@ -124,7 +130,13 @@ async function startNats(dir) {
   })();
   await Promise.race([up, failed]);
   for (let i = 0; i < 50 && !(await reachable(wsPort)); i++) await sleep(100);
-  return { ws: `ws://127.0.0.1:${wsPort}`, tcp: `nats://127.0.0.1:${port}`, stop: () => proc.kill() };
+  // The feed stream, as the real mesh has it (SPEC 18.3), so a member's
+  // durable feed subscription binds here as it does there.
+  const admin = await natsConnect({ servers: `ws://127.0.0.1:${wsPort}` });
+  const jsm = await admin.jetstreamManager();
+  await jsm.streams.add({ name: "MESH_FEED", subjects: ["mesh.feed.*.*"], retention: "interest", storage: "file",
+    max_age: 24 * 3600 * 1e9, duplicate_window: 120 * 1e9 });
+  return { ws: `ws://127.0.0.1:${wsPort}`, tcp: `nats://127.0.0.1:${port}`, raw: admin, stop: () => { admin.close().catch(() => {}); proc.kill(); } };
 }
 
 // ── the test's own agents ───────────────────────────────────────────────────
@@ -238,7 +250,8 @@ async function main() {
   let member = null;
   const agents = [];
   try {
-    const R = await testAgent(nats.ws, "ring-check-runner", ["ring.done"]);
+    const R = await testAgent(nats.ws, "ring-check-runner", ["ring.done", "ring.line"], (offering, input) =>
+      offering === "ring.line" ? { ok: true, lap_id: input?.lap_id, late: false, closed: false } : { ok: true });
     const P = await testAgent(nats.ws, "ring-check-peer-a", ["ring.pass"]);
     const N = await testAgent(nats.ws, "ring-check-peer-b", ["ring.pass"]);
     const G = await testAgent(nats.ws, "ring-check-gateway", ["model.complete"], (_o, input) => ({
@@ -255,7 +268,7 @@ async function main() {
     const dirFile = join(dir, "directory.json");
     writeFileSync(dirFile, JSON.stringify(directory, null, 2));
 
-    member = startMember(o, {
+    const memberEnv = {
       AGENTMESH_SERVERS: `${nats.ws},${nats.tcp}`,
       AGENTMESH_AGENT_SEED: C.seed,
       RING_HANDLE: o.handle,
@@ -263,7 +276,8 @@ async function main() {
       RING_DIRECTORY: dirFile,
       RING_RUNNER: RUNNER,
       RING_GATEWAY: GATEWAY,
-    });
+    };
+    member = startMember(o, memberEnv);
     await member.ready();
 
     const route = (members, seed = R.seed) => signRoute({ members, runner: RUNNER, issued_at: new Date().toISOString() }, seed);
@@ -352,12 +366,16 @@ async function main() {
     });
 
     let declared = null;
+    let pubsub = false;
     await run("declares-live-models", async () => {
       const ans = await ask(R, C.publicKey, "ring.about", {});
       if (ans.status !== "completed" || !ans.output || typeof ans.output !== "object") return [`ring.about answered ${JSON.stringify(ans)}`];
       const a = ans.output;
       const bad = [];
-      if (a.role !== "ring-member" || a.role_version !== 1) bad.push(`role is ${JSON.stringify(a.role)} v${a.role_version}, expected ring-member v1`);
+      if (a.role !== "ring-member" || (a.role_version !== 1 && a.role_version !== 2)) bad.push(`role is ${JSON.stringify(a.role)} v${a.role_version}, expected ring-member v1 or v2`);
+      pubsub = Array.isArray(a.tags) && a.tags.includes(PUBSUB_TAG);
+      if (pubsub && a.role_version !== 2) bad.push("the ring-pubsub tag is carried, but ring.about says role version 1, not 2");
+      if (a.role_version === 2 && !pubsub) bad.push("ring.about says role version 2, but the ring-pubsub tag is not carried");
       if (a.framework !== fw) bad.push(`framework is ${JSON.stringify(a.framework)}, expected ${JSON.stringify(fw)}`);
       if (String(a.handle ?? "").toLowerCase() !== o.handle.toLowerCase()) bad.push(`handle is ${JSON.stringify(a.handle)}`);
       if (a.via !== "gateway" && a.via !== "harness") bad.push(`via is ${JSON.stringify(a.via)}, expected "gateway" or "harness"`);
@@ -366,12 +384,89 @@ async function main() {
         declared = a.live_models;
         // The same declaration as the ring.pass offering's tags on the card,
         // which is where a runner reads it.
-        const want = [`ring-via:${a.via}`, ...a.live_models.map((m) => `ring-model:${m}`)].sort();
+        const want = [`ring-via:${a.via}`, ...a.live_models.map((m) => `ring-model:${m}`), ...(pubsub ? [PUBSUB_TAG] : [])].sort();
         const tags = Array.isArray(a.tags) ? [...a.tags].sort() : null;
         if (!tags || canonicalJSON(tags) !== canonicalJSON(want)) bad.push(`the ring.pass tags are ${JSON.stringify(a.tags)}, expected ${JSON.stringify(want)}`);
       }
       return bad;
     });
+
+    if (pubsub) {
+      const round = (mode = "fixed", model = "ring-check/none") => ({
+        ring: "v1", mode: "pubsub", lap_id: randomUUID(), round: 1,
+        lap: { model, mode, opening: "The lighthouse keeper found a letter with no name on it.", started_at: new Date().toISOString() },
+      });
+      const publish = (data) => R.mesh.publishFeed(ROUND_TOPIC, data, { kind: "stream" });
+      const lines = async (ms) => {
+        const out = [];
+        const deadline = Date.now() + ms;
+        for (;;) {
+          const got = await R.next(Math.max(0, deadline - Date.now()));
+          if (!got) return out;
+          if (got.offering === "ring.line") out.push(got);
+        }
+      };
+      const checkLine = (got, d, late) => {
+        if (!got) return ["no ring.line reached the runner in time"];
+        const bad = [];
+        if (got.offering !== "ring.line") bad.push(`the runner was sent ${got.offering}, expected ring.line`);
+        if (got.from !== C.publicKey) bad.push(`the ring.line came from ${got.from.slice(0, 10)}..., not from the member`);
+        const i = got.input ?? {};
+        if (i.lap_id !== d.lap_id) bad.push("lap_id is not the round's");
+        if (i.round !== d.round) bad.push(`round is ${JSON.stringify(i.round)}, expected ${d.round}`);
+        if (i.late !== late) bad.push(`late is ${JSON.stringify(i.late)}, expected ${late}`);
+        bad.push(...checkEntry(i, { by: o.handle, framework: fw, line: `${fw}:pubsub`, tokens_in: 0, tokens_out: 0 }));
+        return bad;
+      };
+
+      await run("pubsub-answers-a-round", async () => {
+        const d = round();
+        publish(d);
+        return checkLine(await R.next(ANSWER_MS), d, false);
+      });
+
+      await run("pubsub-ignores-a-round-not-from-the-runner", async () => {
+        // An envelope signed by another key, on the runner's feed subject. The
+        // real mesh's permissions would stop it; the member's own check must too.
+        const d = round();
+        const env = signEnvelope(createEnvelope({ type: "emit", from: X.publicKey, payload: { topic: ROUND_TOPIC, kind: "stream", data: d } }), keyPairFromSeed(X.seed));
+        nats.raw.publish(`mesh.feed.${R.id}.${ROUND_TOPIC}`, new TextEncoder().encode(JSON.stringify(env)));
+        await sleep(QUIET_MS);
+        return R.got.length ? [`the member answered a round the runner did not sign (${R.got[0].offering})`] : [];
+      });
+
+      await run("pubsub-answers-each-lap-once", async () => {
+        const d = round();
+        publish(d);
+        publish({ ...d });
+        const got = await lines(10_000 + QUIET_MS);
+        if (got.length !== 1) return [`${got.length} ring.line answers for one lap, expected exactly one`];
+        return checkLine(got[0], d, false);
+      });
+
+      const UNDECLARED = "ring-check/undeclared-model";
+      const coversAll = (declared ?? []).some((p) => p === "*" || p === UNDECLARED || (p.endsWith("*") && UNDECLARED.startsWith(p.slice(0, -1))));
+      await run(`pubsub-sits-out-an-undeclared-model${coversAll ? " (it declares every model, so there is none to sit out)" : ""}`, async () => {
+        if (coversAll) return [];
+        publish(round("live", UNDECLARED));
+        await sleep(QUIET_MS * 2);
+        const bad = [];
+        if (R.got.length) bad.push("the member answered a live round on a model it did not declare");
+        if (G.got.length) bad.push("the member asked the gateway for a model it did not declare");
+        return bad;
+      });
+
+      await run("pubsub-answers-a-round-missed-while-offline", async () => {
+        member.stop();
+        await sleep(3_000);
+        const d = round();
+        publish(d);
+        await sleep(500);
+        member = startMember(o, memberEnv);
+        await member.ready();
+        return checkLine(await R.next(HANDOFF_MS), d, true);
+      });
+    }
 
     if (o.liveStub) {
       const STUB_MODEL = "ring-check/stub-model";
@@ -423,13 +518,16 @@ async function main() {
 
   const passed = results.filter((r) => r.pass).length;
   const roleCases = results.filter((r) => !r.case.startsWith("live-mode"));
-  const conforms = roleCases.length === 7 && roleCases.every((r) => r.pass);
-  console.log(`Ring member check: ${o.handle} (${o.framework}), fixed mode`);
+  const pubsubCases = roleCases.filter((r) => r.case.startsWith("pubsub-"));
+  const v1Cases = roleCases.filter((r) => !r.case.startsWith("pubsub-"));
+  const conforms = v1Cases.length === 7 && roleCases.every((r) => r.pass) && (pubsubCases.length === 0 || pubsubCases.length === 5);
+  console.log(`Ring member check: ${o.handle} (${o.framework}), fixed mode${pubsubCases.length ? ", point to point and pub/sub" : ""}`);
   for (const r of results) {
     console.log(`  ${r.pass ? "PASS" : "FAIL"}  ${r.case}`);
     for (const p of r.problems) console.log(`        ${p}`);
   }
-  console.log(conforms ? `Conforms: all seven cases pass (${passed}/${results.length} run).` : `Does not conform: ${passed} of ${results.length} passed.`);
+  const v2 = pubsubCases.length ? ", and the five pub/sub cases of ring-member v2" : "";
+  console.log(conforms ? `Conforms: all seven cases pass${v2} (${passed}/${results.length} run).` : `Does not conform: ${passed} of ${results.length} passed.`);
   if (o.showLogs && member) console.log(`\n--- the member's output ---\n${member.log}`);
   if (o.json) console.log(JSON.stringify({ handle: o.handle, framework: o.framework, conforms, results }, null, 2));
   process.exit(conforms && results.every((r) => r.pass) ? 0 : 1);
